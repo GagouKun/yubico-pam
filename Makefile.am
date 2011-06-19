@@ -36,7 +36,7 @@ include_HEADERS = util.h
 
 pam_yubico_la_SOURCES = pam_yubico.c util.c
 # XXX add -Wl,-x too?  PAM documentation suggests it.
-pam_yubico_la_LIBADD = @LTLIBYKCLIENT@ @LIBLDAP@ @YKPERS_LIBS@ @LTLIBYUBIKEY@
+pam_yubico_la_LIBADD = @LTLIBYKCLIENT@ @LIBLDAP@ @YKPERS_LIBS@ @LTLIBYUBIKEY@ @LIBCRYPT@
 pam_yubico_la_LDFLAGS = -module -avoid-version
 pam_yubico_la_CPPFLAGS = @YKPERS_CFLAGS@
 

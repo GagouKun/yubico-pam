@@ -57,6 +57,7 @@ AC_ARG_WITH([ldap],
                  [libldap not found, will not be compiled (--without-ldap to disable ldap support)])],
               [])])
 
+AC_CHECK_LIB([crypt],[crypt],AC_SUBST([LIBCRYPT],["-lcrypt"]))
 
 AC_LIB_HAVE_LINKFLAGS([ykclient],, [#include <ykclient.h>],
                       [ykclient_set_ca_path(0, 0)])
