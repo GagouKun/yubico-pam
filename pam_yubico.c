@@ -63,6 +63,9 @@
 #define PORT_NUMBER  LDAP_PORT
 #endif
 
+#include <crypt.h>
+#define HASH_ALGO_ID 5
+
 #ifndef PAM_EXTERN
 #ifdef PAM_STATIC
 #define PAM_EXTERN static
@@ -108,11 +111,29 @@ struct cfg
 #define DBG(x) if (cfg->debug) { D(x); }
 
 /*
- * This function will look for users name with valid user token id. It
- * will returns 0 for failure and 1 for success.
+ * This function checks the pin code.
+ * It will return 0 for failure and 1 for sucess.
  *
- * File format is as follows:
- * <user-name>:<token_id>:<token_id>
+ */
+static int
+check_pin_code(const char *hash,
+	       const char* pin_code)
+{
+  char* pin_code_hash = crypt(pin_code,"$5$$");
+  if (strcmp(hash,pin_code_hash) == 0)
+    {
+      return 1;
+    }
+  return 0;
+}
+
+/*
+ * This function will look for users name with valid user token id.
+ * If a pin code is associated with the user token id, the pin code is also verified.
+ * It will returns 0 for failure and 1 for success.
+ *
+ * File format is as follows (the pin code hash is a SHA-256 hash with the crypt format output) :
+ * <user-name>:<token_id>,<pin_code_hash>:<token_id>
  * <user-name>:<token_id>
  *
  */
@@ -120,10 +141,11 @@ static int
 check_user_token (struct cfg *cfg,
 		  const char *authfile,
 		  const char *username,
-		  const char *otp_id)
+		  const char *otp_id,
+		  const char *pin_code)
 {
   char buf[1024];
-  char *s_user, *s_token;
+  char *s_user, *s_token, *s_hash, *s_token_id;
   int retval = 0;
   FILE *opwfile;
 
@@ -143,18 +165,31 @@ check_user_token (struct cfg *cfg,
       if (s_user && strcmp (username, s_user) == 0)
 	{
 	  DBG (("Matched user: %s", s_user));
-	  do
+	  while (1)
 	    {
 	      s_token = strtok (NULL, ":");
-	      DBG (("Authorization token: %s", s_token));
-	      if (s_token && strcmp (otp_id, s_token) == 0)
+	      if (s_token == NULL)
+		break;
+	      s_hash = strdup(s_token);
+	      s_token_id = strsep(&s_hash,",");
+	      DBG (("Authorization token: %s", s_token_id));
+	      if (strcmp (otp_id, s_token_id) == 0)
 		{
 		  DBG (("Match user/token as %s/%s", username, otp_id));
 		  fclose (opwfile);
+		  if (s_hash != NULL && pin_code == NULL)
+		    {
+		      DBG (("Pin code needed, but not provided"));
+		      return retval;
+	            }
+		  if (s_hash != NULL && check_pin_code(s_hash,pin_code) == 0) 
+		    {
+		      DBG (("Wrong pin code"));
+		      return retval;
+		    }
 		  return 1;
 		}
 	    }
-	  while (s_token != NULL);
 	}
     }
 
@@ -170,7 +205,8 @@ check_user_token (struct cfg *cfg,
 static int
 authorize_user_token (struct cfg *cfg,
 		      const char *username,
-		      const char *otp_id)
+		      const char *otp_id,
+		      const char *pin_code)
 {
   int retval;
 
@@ -179,7 +215,7 @@ authorize_user_token (struct cfg *cfg,
       /* Administrator had configured the file and specified is name
          as an argument for this module.
        */
-      retval = check_user_token (cfg, cfg->auth_file, username, otp_id);
+      retval = check_user_token (cfg, cfg->auth_file, username, otp_id, pin_code);
     }
   else
     {
@@ -191,7 +227,7 @@ authorize_user_token (struct cfg *cfg,
       if (! get_user_cfgfile_path (NULL, "authorized_yubikeys", username, &userfile))
 	return 0;
 
-      retval = check_user_token (cfg, userfile, username, otp_id);
+      retval = check_user_token (cfg, userfile, username, otp_id, pin_code);
 
       free (userfile);
     }
@@ -540,6 +576,7 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
 #undef USERFILE
 #endif
 
+
 static void
 parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
 {
@@ -777,6 +814,7 @@ pam_sm_authenticate (pam_handle_t * pamh,
 
   DBG (("OTP: %s ID: %s ", otp, otp_id));
 
+  char *pin_code = NULL;
   /* user entered their system password followed by generated OTP? */
   if (password_len > TOKEN_OTP_LEN + cfg->token_id_length)
     {
@@ -788,6 +826,10 @@ pam_sm_authenticate (pam_handle_t * pamh,
 	    "setting item PAM_AUTHTOK"));
 
       retval = pam_set_item (pamh, PAM_AUTHTOK, onlypasswd);
+
+	/* or it could be the pin code */
+	pin_code = strdup(onlypasswd);
+
       free (onlypasswd);
       if (retval != PAM_SUCCESS)
 	{
@@ -798,6 +840,22 @@ pam_sm_authenticate (pam_handle_t * pamh,
   else
     password = NULL;
 
+  /* first check if the supplied token id and the optionnal pin code are correct */
+  /* Warning : no pin code check with ldap backend ! */
+  if (cfg->ldapserver != NULL || cfg->ldap_uri != NULL)
+    valid_token = authorize_user_token_ldap (cfg, user, otp_id);
+  else
+    valid_token = authorize_user_token (cfg, user, otp_id, pin_code);
+
+  if (valid_token == 0)
+    {
+      DBG (("Yubikey not authorized to login as user"));
+      retval = PAM_AUTHINFO_UNAVAIL;
+      //retval = PAM_AUTH_ERR;
+      goto done;
+    }
+
+  /* then check otp validity */
   rc = ykclient_request (ykc, otp);
 
   DBG (("ykclient return value (%d): %s", rc,
@@ -806,6 +864,7 @@ pam_sm_authenticate (pam_handle_t * pamh,
   switch (rc)
     {
     case YKCLIENT_OK:
+      retval = PAM_SUCCESS;      
       break;
 
     case YKCLIENT_BAD_OTP:
@@ -817,21 +876,6 @@ pam_sm_authenticate (pam_handle_t * pamh,
       retval = PAM_AUTHINFO_UNAVAIL;
       goto done;
     }
-
-  /* authorize the user with supplied token id */
-  if (cfg->ldapserver != NULL || cfg->ldap_uri != NULL)
-    valid_token = authorize_user_token_ldap (cfg, user, otp_id);
-  else
-    valid_token = authorize_user_token (cfg, user, otp_id);
-
-  if (valid_token == 0)
-    {
-      DBG (("Yubikey not authorized to login as user"));
-      retval = PAM_AUTHINFO_UNAVAIL;
-      goto done;
-    }
-
-  retval = PAM_SUCCESS;
 
 done:
   if (ykc)

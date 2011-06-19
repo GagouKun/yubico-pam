@@ -212,6 +212,7 @@ If the central authorization mapping file is being used, user home directory
 mappings will not be used and the opposite applies if user home directory
 mappings are being used, the central authorization mappings file will not
 be used.
+A pin code can be attached with the Yubikey token ID.
 
 Central authorization mapping
 -----------------------------
@@ -219,11 +220,13 @@ Central authorization mapping
 Create a /etc/yubikey_mappings, the file must contain a user name and the
 Yubikey token ID separated by colons (same format as the passwd file) for
 each user you want to allow onto the system using a Yubikey.
+The pin code hash is optionnal and is a SHA-256 hash. It follows the crypt format (same format
+as the shadow file).
 
 The mappings should look like this, one per line:
 
 ------
-   <user name>:<Yubikey token ID>:<Yubikey token ID>:….
+   <user name>:<Yubikey token ID>,<pin code hash>:<Yubikey token ID>:….
    <user name>:<Yubikey token ID>:<Yubikey token ID>:….
 ------
 
