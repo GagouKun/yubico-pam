@@ -1,5 +1,32 @@
 pam_yubico NEWS -- History of user-visible changes.             -*- outline -*-
 
+* Version 2.10 (released 2011-12-14)
+
+** Drop permissions (to the user that is trying to authenticate) before
+accessing files in the users home directory. Largely based on a patch by
+Ricky Zhou <ricky@fedoraproject.org>. Thanks!
+** Restore challenge-response support - version 2.7 was supposed to make
+the dependency on libykpers optional, but in reality accidentally
+disabled challenge-response for all configurations. As before, use
+--without-cr to compile pam_yubico without the ykpers dependency.
+
+* Version 2.9 (released 2011-11-17)
+
+** Security: Explicitly request ykclient to verify server signature.
+ykclient <= 2.5 strangely enough defaults to signing requests, but not
+verifying signatures in responses when it is supplied with a client key.
+
+Reported and patched by Dominic Rutherford <dominic@rutherfordfamily.co.uk>.
+
+* Version 2.8 (released 2011-08-26)
+
+** Fix big security hole: Authentication succeeded when no password
+was given, unless use_first_pass was being used.
+This is fatal if pam_yubico is considered 'sufficient' in the PAM
+configuration.
+
+Reported and patched by Nanakos Chrysostomos <nanakos@wired-net.gr>.
+
 * Version 2.7 (released 2011-06-07)
 
 ** Make dependency on libykpers optional.

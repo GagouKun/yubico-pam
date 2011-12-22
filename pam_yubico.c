@@ -34,7 +34,19 @@
 #include <ctype.h>
 #include <syslog.h>
 
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <errno.h>
+#include <string.h>
+
 #include "util.h"
+#include "drop_privs.h"
+
+#if HAVE_CR
+/* for yubikey_hex_decode and yubikey_hex_p */
+#include <yubikey.h>
+#endif /* HAVE_CR */
 
 /* Libtool defines PIC for shared objects */
 #ifndef PIC
@@ -147,14 +159,34 @@ check_user_token (struct cfg *cfg,
   char buf[1024];
   char *s_user, *s_token, *s_hash, *s_token_id;
   int retval = 0;
+  int fd;
+  struct stat st;
   FILE *opwfile;
 
-  opwfile = fopen (authfile, "r");
-  if (opwfile == NULL)
-    {
-      DBG (("Cannot open file: %s", authfile));
+  fd = open(authfile, O_RDONLY, 0);
+  if (fd < 0) {
+      DBG (("Cannot open file: %s (%s)", authfile, strerror(errno)));
       return retval;
-    }
+  }
+
+  if (fstat(fd, &st) < 0) {
+      DBG (("Cannot stat file: %s (%s)", authfile, strerror(errno)));
+      close(fd);
+      return retval;
+  }
+
+  if (!S_ISREG(st.st_mode)) {
+      DBG (("%s is not a regular file", authfile));
+      close(fd);
+      return retval;
+  }
+
+  opwfile = fdopen(fd, "r");
+  if (opwfile == NULL) {
+      DBG (("fdopen: %s", strerror(errno)));
+      close(fd);
+      return retval;
+  }
 
   while (fgets (buf, 1024, opwfile))
     {
@@ -206,7 +238,8 @@ static int
 authorize_user_token (struct cfg *cfg,
 		      const char *username,
 		      const char *otp_id,
-		      const char *pin_code)
+		      const char *pin_code,
+		      pam_handle_t *pamh)
 {
   int retval;
 
@@ -215,25 +248,47 @@ authorize_user_token (struct cfg *cfg,
       /* Administrator had configured the file and specified is name
          as an argument for this module.
        */
+      DBG (("Using system-wide auth_file %s", cfg->auth_file));
       retval = check_user_token (cfg, cfg->auth_file, username, otp_id, pin_code);
     }
   else
     {
       char *userfile = NULL;
+      struct passwd *p;
+
+      p = getpwnam (username);
+      if (p == NULL) {
+	DBG (("getpwnam: %s", strerror(errno)));
+	return 0;
+      }
 
       /* Getting file from user home directory
          ..... i.e. ~/.yubico/authorized_yubikeys
        */
-      if (! get_user_cfgfile_path (NULL, "authorized_yubikeys", username, &userfile))
+      if (! get_user_cfgfile_path (NULL, "authorized_yubikeys", username, &userfile)) {
+	D (("Failed figuring out per-user cfgfile"));
 	return 0;
+      }
+
+      DBG (("Dropping privileges"));
+
+      if (drop_privileges(p, pamh) < 0) {
+	D (("could not drop privileges"));
+	return 0;
+      }
 
       retval = check_user_token (cfg, userfile, username, otp_id, pin_code);
+
+      if (restore_privileges(pamh) < 0)
+	{
+	  DBG (("could not restore privileges"));
+	  return 0;
+	}
 
       free (userfile);
     }
 
   return retval;
-#undef USERFILE
 }
 
 /*
@@ -268,7 +323,7 @@ authorize_user_token_ldap (struct cfg *cfg,
   struct berval **vals;
   int i, rc;
 
-  char *find = NULL, *sr = NULL;
+  char *find = NULL;
 
   if (cfg->user_attr == NULL) {
     DBG (("Trying to look up user to YubiKey mapping in LDAP, but user_attr not set!"));
@@ -318,7 +373,12 @@ authorize_user_token_ldap (struct cfg *cfg,
     }
 
   /* Allocation of memory for search strings depending on input size */
-  find = malloc((strlen(cfg->user_attr)+strlen(cfg->ldapdn)+strlen(user)+3)*sizeof(char));
+  i = (strlen(cfg->user_attr) + strlen(cfg->ldapdn) + strlen(user) + 3) * sizeof(char);
+  if ((find = malloc(i)) == NULL) {
+    DBG (("Failed allocating %i bytes", i));
+    retval = 0;
+    goto done;
+  }
 
   sprintf (find, "%s=%s,%s", cfg->user_attr, user, cfg->ldapdn);
 
@@ -380,8 +440,6 @@ authorize_user_token_ldap (struct cfg *cfg,
   /* free memory allocated for search strings */
   if (find != NULL)
     free(find);
-  if (sr != NULL)
-    free(sr);
 
 #else
   DBG (("Trying to use LDAP, but this function is not compiled in pam_yubico!!"));
@@ -390,6 +448,7 @@ authorize_user_token_ldap (struct cfg *cfg,
   return retval;
 }
 
+#if HAVE_CR
 static int
 display_error(pam_handle_t *pamh, char *message) {
   struct pam_conv *conv;
@@ -417,24 +476,26 @@ display_error(pam_handle_t *pamh, char *message) {
   D(("conv returned: '%s'", resp->resp));
   return retval;
 }
+#endif /* HAVE_CR */
 
-#if HAVE_LIBYKPERS_1
+#if HAVE_CR
 static int
 do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
 {
   char *userfile = NULL, *tmpfile = NULL;
   FILE *f = NULL;
-  unsigned char buf[CR_RESPONSE_SIZE + 16], response_hex[CR_RESPONSE_SIZE * 2 + 1];
-  int ret;
+  char buf[CR_RESPONSE_SIZE + 16], response_hex[CR_RESPONSE_SIZE * 2 + 1];
+  int ret, fd;
 
   unsigned int flags = 0;
   unsigned int response_len = 0;
-  unsigned int expect_bytes = 0;
   YK_KEY *yk = NULL;
   CR_STATE state;
 
-  int len;
   char *errstr = NULL;
+
+  struct passwd *p;
+  struct stat st;
 
   ret = PAM_AUTH_ERR;
   flags |= YK_FLAG_MAYBLOCK;
@@ -457,8 +518,42 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
 
   DBG(("Loading challenge from file %s", userfile));
 
-  /* XXX should drop root privileges before opening file in user's home directory */
-  f = fopen(userfile, "r");
+  p = getpwnam (username);
+  if (p == NULL) {
+      DBG (("getpwnam: %s", strerror(errno)));
+      goto out;
+  }
+
+  /* Drop privileges before opening user file. */
+  if (drop_privileges(p, pamh) < 0) {
+      D (("could not drop privileges"));
+      goto out;
+  }
+
+  fd = open(userfile, O_RDONLY, 0);
+  if (fd < 0) {
+      DBG (("Cannot open file: %s (%s)", userfile, strerror(errno)));
+      goto out;
+  }
+
+  if (fstat(fd, &st) < 0) {
+      DBG (("Cannot stat file: %s (%s)", userfile, strerror(errno)));
+      close(fd);
+      goto out;
+  }
+
+  if (!S_ISREG(st.st_mode)) {
+      DBG (("%s is not a regular file", userfile));
+      close(fd);
+      goto out;
+  }
+
+  f = fdopen(fd, "r");
+  if (f == NULL) {
+      DBG (("fdopen: %s", strerror(errno)));
+      close(fd);
+      goto out;
+  }
 
   if (! load_chalresp_state(f, &state))
     goto out;
@@ -466,6 +561,11 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
   if (fclose(f) < 0) {
     f = NULL;
     goto out;
+  }
+
+  if (restore_privileges(pamh) < 0) {
+      DBG (("could not restore privileges"));
+      goto out;
   }
 
   if (! challenge_response(yk, state.slot, state.challenge, state.challenge_len,
@@ -479,7 +579,7 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
    * Check YubiKey response against the expected response
    */
 
-  yubikey_hex_encode(response_hex, (char *)buf, response_len);
+  yubikey_hex_encode(response_hex, buf, response_len);
 
   if (memcmp(buf, state.response, response_len) == 0) {
     ret = PAM_SUCCESS;
@@ -517,6 +617,12 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
   memcpy (state.response, buf, response_len);
   state.response_len = response_len;
 
+  /* Drop privileges before creating new challenge file. */
+  if (drop_privileges(p, pamh) < 0) {
+      D (("could not drop privileges"));
+      goto out;
+  }
+
   /* Write out the new file */
   tmpfile = malloc(strlen(userfile) + 1 + 4);
   if (! tmpfile)
@@ -538,6 +644,11 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
   f = NULL;
   if (rename(tmpfile, userfile) < 0) {
     goto out;
+  }
+
+  if (restore_privileges(pamh) < 0) {
+      DBG (("could not restore privileges"));
+      goto out;
   }
 
   DBG(("Challenge-response success!"));
@@ -573,8 +684,7 @@ do_challenge_response(pam_handle_t *pamh, struct cfg *cfg, const char *username)
   free(tmpfile);
   return ret;
 }
-#undef USERFILE
-#endif
+#endif /* HAVE_CR */
 
 
 static void
@@ -687,7 +797,7 @@ pam_sm_authenticate (pam_handle_t * pamh,
   DBG (("get user returned: %s", user));
 
   if (cfg->mode == CHRESP) {
-#if HAVE_LIBYKPERS_1
+#if HAVE_CR
     return do_challenge_response(pamh, cfg, user);
 #else
     DBG (("no support for challenge/response"));
@@ -731,6 +841,9 @@ pam_sm_authenticate (pam_handle_t * pamh,
       retval = PAM_AUTHINFO_UNAVAIL;
       goto done;
     }
+
+  if (cfg->client_key)
+    ykclient_set_verify_signature (ykc, 1);
 
   if (cfg->capath)
     ykclient_set_ca_path (ykc, cfg->capath);
@@ -784,6 +897,7 @@ pam_sm_authenticate (pam_handle_t * pamh,
       if (resp->resp == NULL)
 	{
 	  DBG (("conv returned NULL passwd?"));
+	  retval = PAM_AUTH_ERR;
 	  goto done;
 	}
 
@@ -820,6 +934,11 @@ pam_sm_authenticate (pam_handle_t * pamh,
     {
       char *onlypasswd = strdup (password);
 
+      if (! onlypasswd) {
+	retval = PAM_BUF_ERR;
+	goto done;
+      }
+
       onlypasswd[password_len - (TOKEN_OTP_LEN + cfg->token_id_length)] = '\0';
 
       DBG (("Extracted a probable system password entered before the OTP - "
@@ -845,13 +964,12 @@ pam_sm_authenticate (pam_handle_t * pamh,
   if (cfg->ldapserver != NULL || cfg->ldap_uri != NULL)
     valid_token = authorize_user_token_ldap (cfg, user, otp_id);
   else
-    valid_token = authorize_user_token (cfg, user, otp_id, pin_code);
+    valid_token = authorize_user_token (cfg, user, otp_id, pin_code, pamh);
 
   if (valid_token == 0)
     {
       DBG (("Yubikey not authorized to login as user"));
       retval = PAM_AUTHINFO_UNAVAIL;
-      //retval = PAM_AUTH_ERR;
       goto done;
     }
 
@@ -876,6 +994,8 @@ pam_sm_authenticate (pam_handle_t * pamh,
       retval = PAM_AUTHINFO_UNAVAIL;
       goto done;
     }
+
+  retval = PAM_SUCCESS;
 
 done:
   if (ykc)

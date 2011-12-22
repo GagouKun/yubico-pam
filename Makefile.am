@@ -32,11 +32,11 @@ libdir = $(PAMDIR)
 
 lib_LTLIBRARIES = pam_yubico.la
 
-include_HEADERS = util.h
+include_HEADERS = util.h drop_privs.h
 
-pam_yubico_la_SOURCES = pam_yubico.c util.c
+pam_yubico_la_SOURCES = pam_yubico.c util.c drop_privs.c
 # XXX add -Wl,-x too?  PAM documentation suggests it.
-pam_yubico_la_LIBADD = @LTLIBYKCLIENT@ @LIBLDAP@ @YKPERS_LIBS@ @LTLIBYUBIKEY@ @LIBCRYPT@
+pam_yubico_la_LIBADD = @LTLIBYKCLIENT@ @LIBLDAP@ @YKPERS_LIBS@ @LTLIBYUBIKEY@ @LIBCRYPT@ -lpam
 pam_yubico_la_LDFLAGS = -module -avoid-version
 pam_yubico_la_CPPFLAGS = @YKPERS_CFLAGS@
 
@@ -59,7 +59,7 @@ endif
 # Self tests.
 
 AM_LDFLAGS = -no-install
-LDADD = ./pam_yubico.la -lpam
+LDADD = ./pam_yubico.la
 
 check_PROGRAMS = test
 TESTS = $(check_PROGRAMS)
@@ -74,7 +74,7 @@ ChangeLog:
 
 check-doc-dist:
 	cd $(srcdir) && git submodule update
-	cd $(srcdir)/doc && git pull
+	cd $(srcdir)/doc && git checkout master && git pull
 	perl -pe "s,^EXTRA_DIST = .*,EXTRA_DIST = `cd $(srcdir) && ls doc/*.asciidoc | grep -v Todo.ascii | xargs echo`," \
 		< $(srcdir)/Makefile.am > check-doc-dist.tmp
 	diff -ur $(srcdir)/Makefile.am check-doc-dist.tmp || \
