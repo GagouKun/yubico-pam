@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Yubico AB.
+ * Copyright (c) 2011-2012 Yubico AB
  * Copyright (c) 2011 Tollef Fog Heen <tfheen@err.no>
  * All rights reserved.
  *
@@ -36,6 +36,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <pwd.h>
+#include <unistd.h>
 
 #include "util.h"
 
@@ -153,7 +154,7 @@ int challenge_response(YK_KEY *yk, int slot,
 	if (res_size < sizeof(64 + 16))
 	  return 0;
 
-	memset(response, 0, sizeof(response));
+	memset(response, 0, res_size);
 
 	if (verbose) {
 		fprintf(stderr, "Sending %i bytes %s challenge to slot %i\n", len, (hmac == true)?"HMAC":"Yubico", slot);
@@ -240,7 +241,7 @@ get_user_challenge_file(YK_KEY *yk, const char *chalresp_path, const char *usern
 }
 
 int
-load_chalresp_state(FILE *f, CR_STATE *state)
+load_chalresp_state(FILE *f, CR_STATE *state, bool verbose)
 {
   /*
    * Load the current challenge and expected response information from a file handle.
@@ -259,13 +260,14 @@ load_chalresp_state(FILE *f, CR_STATE *state)
    * 40 is twice the size of CR_RESPONSE_SIZE
    * (twice because we hex encode the challenge and response)
    */
-  r = fscanf(f, "v1:%126[0-9a-z]:%40[0-9a-z]:%d", &challenge_hex, &response_hex, &slot);
+  r = fscanf(f, "v1:%126[0-9a-z]:%40[0-9a-z]:%d", &challenge_hex[0], &response_hex[0], &slot);
   if (r != 3) {
-    D(("Could not parse contents of chalres_state file (%i)", r));
+    D(("Could not parse contents of chalresp_state file (%i)", r));
     goto out;
   }
 
-  D(("Challenge: %s, response: %s, slot: %d", challenge_hex, response_hex, slot));
+  if (verbose)
+    D(("Challenge: %s, expected response: %s, slot: %d", challenge_hex, response_hex, slot));
 
   if (! yubikey_hex_p(challenge_hex)) {
     D(("Invalid challenge hex input : %s", challenge_hex));

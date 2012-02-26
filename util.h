@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Yubico AB.
+ * Copyright (c) 2011-2012 Yubico AB
  * Copyright (c) 2011 Tollef Fog Heen <tfheen@err.no>
  * All rights reserved.
  *
@@ -50,6 +50,8 @@
     printf ("\n");							\
   } while (0)
 # endif /* HAVE_SECURITY__PAM_MACROS_H */
+#else
+# define D(x)
 #endif /* DEBUG_PAM */
 
 int get_user_cfgfile_path(const char *common_path, const char *filename, const char *username, char **fn);
@@ -80,7 +82,7 @@ int generate_random(void *buf, int len);
 
 int get_user_challenge_file(YK_KEY *yk, const char *chalresp_path, const char *username, char **fn);
 
-int load_chalresp_state(FILE *f, CR_STATE *state);
+int load_chalresp_state(FILE *f, CR_STATE *state, bool verbose);
 int write_chalresp_state(FILE *f, CR_STATE *state);
 
 int init_yubikey(YK_KEY **yk);
